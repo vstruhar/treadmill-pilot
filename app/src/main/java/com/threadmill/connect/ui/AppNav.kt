@@ -1,5 +1,7 @@
 package com.threadmill.connect.ui
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -60,7 +62,15 @@ fun AppNav(app: TreadmillApp) {
                 Text("Run in progress", color = Accent)
             }
         }
-        NavHost(nav, startDestination = "workouts", modifier = Modifier.weight(1f)) {
+        NavHost(
+            nav,
+            startDestination = "workouts",
+            modifier = Modifier.weight(1f),
+            enterTransition = { EnterTransition.None },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = { ExitTransition.None },
+        ) {
             composable("workouts") { WorkoutsScreen(nav) }
             composable("history") { HistoryScreen(nav) }
             composable("stats") { StatsScreen(nav) }
