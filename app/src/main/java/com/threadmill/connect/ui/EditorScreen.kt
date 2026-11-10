@@ -3,7 +3,8 @@ package com.threadmill.connect.ui
 import android.app.Application
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -13,7 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -34,14 +35,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,6 +71,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class EditorViewModel(app: Application, private val workoutId: String?) : AndroidViewModel(app) {
@@ -102,14 +111,10 @@ class EditorViewModel(app: Application, private val workoutId: String?) : Androi
         state.value = current.copy(intervals = current.intervals.map { if (it.id == interval.id) interval else it })
     }
 
-    fun move(from: Int, delta: Int) {
+    fun move(id: String, delta: Int) {
         val current = state.value ?: return
-        val to = (from + delta).coerceIn(0, current.intervals.lastIndex)
-        if (from !in current.intervals.indices || from == to) return
-        val next = current.intervals.toMutableList()
-        val item = next.removeAt(from)
-        next.add(to, item)
-        state.value = current.copy(intervals = next)
+        val next = current.intervals.reordered(id, delta)
+        if (next !== current.intervals) state.value = current.copy(intervals = next)
     }
 
     fun duplicate(id: String) {
@@ -222,9 +227,9 @@ fun EditorScreen(workoutId: String?, nav: NavHostController) {
             modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
         )
         model.error?.let { Text(it, color = Coral, modifier = Modifier.padding(bottom = 8.dp)) }
-        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            itemsIndexed(current.intervals, key = { _, interval -> interval.id }) { index, interval ->
-                IntervalRow(interval, onClick = { editing = interval.id }, onMove = { delta -> model.move(index, delta) })
+        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(IntervalListSpacing)) {
+            items(current.intervals, key = { it.id }) { interval ->
+                IntervalRow(interval, onClick = { editing = interval.id }, onMove = { delta -> model.move(interval.id, delta) })
             }
         }
         Button(
@@ -249,10 +254,7 @@ fun EditorScreen(workoutId: String?, nav: NavHostController) {
                     model.delete(selected.id)
                     editing = null
                 },
-                onMove = { delta ->
-                    val index = current.intervals.indexOfFirst { it.id == selected.id }
-                    if (index >= 0) model.move(index, delta)
-                },
+                onMove = { delta -> model.move(selected.id, delta) },
             )
         }
     }
@@ -260,14 +262,16 @@ fun EditorScreen(workoutId: String?, nav: NavHostController) {
 
 @Composable
 private fun IntervalRow(interval: DraftInterval, onClick: () -> Unit, onMove: (Int) -> Unit) {
-    var offset by remember(interval.id) { mutableFloatStateOf(0f) }
-    var rowHeight by remember(interval.id) { mutableFloatStateOf(1f) }
+    val offset = remember(interval.id) { mutableFloatStateOf(0f) }
+    val rowHeight = remember(interval.id) { mutableFloatStateOf(0f) }
+    val onMoveLatest = rememberUpdatedState(onMove)
+    val gapPx = with(LocalDensity.current) { IntervalListSpacing.toPx() }
     Row(
         Modifier
             .fillMaxWidth()
-            .zIndex(if (offset != 0f) 1f else 0f)
-            .graphicsLayer { translationY = offset }
-            .onSizeChanged { rowHeight = it.height.toFloat().coerceAtLeast(1f) }
+            .zIndex(if (offset.floatValue != 0f) 1f else 0f)
+            .graphicsLayer { translationY = offset.floatValue }
+            .onSizeChanged { rowHeight.floatValue = it.height.toFloat() }
             .clip(RoundedCornerShape(12.dp))
             .background(CardInk)
             .clickable(onClick = onClick)
@@ -280,17 +284,15 @@ private fun IntervalRow(interval: DraftInterval, onClick: () -> Unit, onMove: (I
             tint = Mist,
             modifier = Modifier
                 .pointerInput(interval.id) {
-                    detectDragGesturesAfterLongPress(
+                    detectReorderDrag(
+                        onDrag = { delta -> offset.floatValue += delta },
                         onDragEnd = {
-                            val steps = (offset / rowHeight).roundToInt()
-                            offset = 0f
-                            if (steps != 0) onMove(steps)
+                            val pitch = rowHeight.floatValue + gapPx
+                            val steps = if (pitch > 0f) (offset.floatValue / pitch).roundToInt() else 0
+                            offset.floatValue = 0f
+                            if (steps != 0) onMoveLatest.value(steps)
                         },
-                        onDragCancel = { offset = 0f },
-                        onDrag = { change, drag ->
-                            change.consume()
-                            offset += drag.y
-                        },
+                        onDragCancel = { offset.floatValue = 0f },
                     )
                 }
                 .padding(8.dp),
@@ -347,6 +349,67 @@ private fun Stepper(label: String, value: String, onStep: (Int) -> Unit) {
         OutlinedButton(onClick = { onStep(-1) }) { Text("−", color = Paper) }
         Text(value, color = Paper, modifier = Modifier.padding(horizontal = 12.dp), fontWeight = FontWeight.SemiBold)
         OutlinedButton(onClick = { onStep(1) }) { Text("+", color = Paper) }
+    }
+}
+
+private val IntervalListSpacing = 8.dp
+
+internal fun List<DraftInterval>.reordered(id: String, delta: Int): List<DraftInterval> {
+    if (delta == 0) return this
+    val from = indexOfFirst { it.id == id }
+    if (from < 0) return this
+    val to = (from + delta).coerceIn(0, lastIndex)
+    if (from == to) return this
+    val next = toMutableList()
+    next.add(to, next.removeAt(from))
+    return next
+}
+
+// The handle claims the pointer on the initial pass. The list scroller only sees the
+// gesture afterwards, so a drag reorders instead of scrolling.
+private suspend fun PointerInputScope.detectReorderDrag(
+    onDrag: (Float) -> Unit,
+    onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit,
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val slop = viewConfiguration.touchSlop
+        var pastSlop = false
+        var pending = 0f
+        try {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id }
+                if (change == null || change.changedToUpIgnoreConsumed() || (!pastSlop && change.isConsumed)) {
+                    if (pastSlop) {
+                        if (change != null) {
+                            val delta = change.positionChangeIgnoreConsumed().y
+                            if (delta != 0f) onDrag(delta)
+                            change.consume()
+                        }
+                        onDragEnd()
+                    }
+                    break
+                }
+                val delta = change.positionChangeIgnoreConsumed().y
+                if (!pastSlop) {
+                    pending += delta
+                    if (abs(pending) > slop) {
+                        pastSlop = true
+                        change.consume()
+                        onDrag(pending)
+                        pending = 0f
+                    }
+                } else {
+                    change.consume()
+                    if (delta != 0f) onDrag(delta)
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            if (pastSlop) onDragCancel()
+            throw cancelled
+        }
     }
 }
 
