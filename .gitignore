@@ -1,0 +1,28 @@
+# Gradle and Kotlin
+.gradle/
+.kotlin/
+build/
+
+# Local machine settings (Android SDK path)
+local.properties
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+
+# Android build output
+captures/
+.cxx/
+.externalNativeBuild/
+*.apk
+*.aab
+*.xapk
+
+# Signing keys
+*.jks
+*.keystore
+
+# OS files
+.DS_Store
+Thumbs.db
